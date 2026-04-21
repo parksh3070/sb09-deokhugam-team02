@@ -10,16 +10,19 @@ import com.deokhugam.deokhugam_server.domain.book.entity.Book;
 import com.deokhugam.deokhugam_server.domain.book.entity.PopularBook;
 import com.deokhugam.deokhugam_server.domain.book.mapper.BookMapper;
 import com.deokhugam.deokhugam_server.domain.book.repository.BookRepository;
+import com.deokhugam.deokhugam_server.domain.book.repository.PopularBookRepository;
 import com.deokhugam.deokhugam_server.global.exception.DeokhugamException;
 import com.deokhugam.deokhugam_server.global.exception.ErrorCode;
 import com.deokhugam.deokhugam_server.global.response.CursorPageResponse;
 import com.deokhugam.deokhugam_server.global.type.Period;
-import com.deokhugam.deokhugam_server.global.util.PeriodUtil;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -29,8 +32,15 @@ import org.springframework.web.multipart.MultipartFile;
 @Transactional(readOnly = true)
 public class BookServiceImpl implements BookService {
 
+    private static final List<String> ALLOWED_ORDER_BY =
+            List.of("title", "publisheddate", "rating", "reviewcount");
+
+    private static final List<String> ALLOWED_DIRECTION =
+            List.of("ASC", "DESC");
+
     private final BookRepository bookRepository;
     private final BookMapper bookMapper;
+    private final PopularBookRepository popularBookRepository;
 
     @Override
     @Transactional
@@ -49,11 +59,13 @@ public class BookServiceImpl implements BookService {
         );
 
         Book savedBook = bookRepository.save(book);
-        return toBookDto(savedBook);
+        return getBook(savedBook.getId());
     }
 
     @Override
     public CursorPageResponse<BookDto> getBooks(BookSearchRequest request) {
+        validateBookSearchRequest(request);
+
         List<BookSearchQueryDto> queryResults = bookRepository.searchBooks(request);
         long totalElements = bookRepository.countBooks(request);
 
@@ -87,10 +99,12 @@ public class BookServiceImpl implements BookService {
 
     @Override
     public BookDto getBook(UUID bookId) {
-        Book book = bookRepository.findByIdAndIsDeletedFalse(bookId)
-                .orElseThrow(() -> new DeokhugamException(ErrorCode.BOOK_NOT_FOUND));
+        BookSearchQueryDto bookDetail = bookRepository.findBookDetail(bookId);
+        if (bookDetail == null) {
+            throw new DeokhugamException(ErrorCode.BOOK_NOT_FOUND);
+        }
 
-        return toBookDto(book);
+        return bookMapper.toDto(bookDetail);
     }
 
     @Override
@@ -108,7 +122,7 @@ public class BookServiceImpl implements BookService {
                 request.publishedDate()
         );
 
-        return toBookDto(book);
+        return getBook(book.getId());
     }
 
     @Override
@@ -130,25 +144,30 @@ public class BookServiceImpl implements BookService {
     }
 
     @Override
-    public List<PopularBookDto> searchPopularBooks(
-            Period period,
-            String direction,
-            String cursor,
-            String after,
-            int limit
+    public CursorPageResponse<PopularBookDto> searchPopularBooks(
+            Period period, String direction, String cursor, String after, int limit
     ) {
-        LocalDateTime startTime = PeriodUtil.calculateStartTime(period);
-        List<PopularBook> popularBooks = bookRepository.findPopularBooksWithPaging(
-                startTime,
-                direction,
-                cursor,
-                after,
-                limit
+        Integer cursorRank = (cursor != null && !cursor.isBlank()) ? Integer.parseInt(cursor) : null;
+        LocalDateTime afterLdt = parseLocalDateTime(after);
+
+        List<PopularBook> popularBooks = popularBookRepository.findPopularBooksWithPaging(
+            period, direction.toUpperCase(), cursorRank, afterLdt,
+            Limit.of(limit + 1)
         );
 
-        return popularBooks.stream()
-                .map(bookMapper::toPopularDto)
-                .collect(Collectors.toList());
+        long totalElements = popularBookRepository.countByPeriodType(period);
+
+        boolean hasNext = popularBooks.size() > limit;
+        List<PopularBook> content = hasNext ? popularBooks.subList(0, limit) : popularBooks;
+
+        String nextCursor =
+            content.isEmpty() ? null : String.valueOf(content.get(content.size() - 1).getRankOrder());
+        LocalDateTime nextAfter =
+            content.isEmpty() ? null : content.get(content.size() - 1).getCreatedAt();
+        return new CursorPageResponse<>(
+            content.stream().map(bookMapper::toPopularDto).toList(),
+            nextCursor, nextAfter, content.size(), totalElements, hasNext
+        );
     }
 
     private BookDto toBookDto(Book book) {
@@ -156,18 +175,14 @@ public class BookServiceImpl implements BookService {
     }
 
     private void validateDuplicateIsbn(String isbn) {
-        if (isbn == null) {
-            return;
-        }
-
-        if (bookRepository.existsByIsbnAndIsDeletedFalse(isbn)) {
+        if (bookRepository.existsByIsbn(isbn)) {
             throw new DeokhugamException(ErrorCode.DUPLICATE_ISBN);
         }
     }
 
     private String normalizeIsbn(String isbn) {
         if (isbn == null || isbn.isBlank()) {
-            return null;
+            throw new DeokhugamException(ErrorCode.INVALID_INPUT_VALUE);
         }
 
         return isbn.replace("-", "").trim();
@@ -181,13 +196,70 @@ public class BookServiceImpl implements BookService {
         return value.trim();
     }
 
+    private void validateBookSearchRequest(BookSearchRequest request) {
+        String normalizedOrderBy = normalizeOrderBy(request.orderBy());
+        String normalizedDirection = normalizeDirection(request.direction());
+
+        if (!ALLOWED_ORDER_BY.contains(normalizedOrderBy)) {
+            throw new DeokhugamException(ErrorCode.INVALID_INPUT_VALUE);
+        }
+
+        if (!ALLOWED_DIRECTION.contains(normalizedDirection)) {
+            throw new DeokhugamException(ErrorCode.INVALID_INPUT_VALUE);
+        }
+
+        boolean hasCursor = request.cursor() != null && !request.cursor().isBlank();
+        boolean hasAfter = request.after() != null;
+
+        if (hasCursor != hasAfter) {
+            throw new DeokhugamException(ErrorCode.INVALID_INPUT_VALUE);
+        }
+    }
+
+    private void validatePopularSearchDirection(String direction) {
+        String normalizedDirection = normalizeDirection(direction);
+
+        if (!ALLOWED_DIRECTION.contains(normalizedDirection)) {
+            throw new DeokhugamException(ErrorCode.INVALID_INPUT_VALUE);
+        }
+    }
+
     private String extractNextCursor(BookSearchQueryDto item, String orderBy) {
-        return switch (orderBy) {
-            case "publishedDate" -> item.publishedDate() == null ? "" : item.publishedDate().toString();
+        String normalizedOrderBy = normalizeOrderBy(orderBy);
+
+        return switch (normalizedOrderBy) {
+            case "publisheddate" -> item.publishedDate() == null ? null : item.publishedDate().toString();
             case "rating" -> String.valueOf(item.rating());
-            case "reviewCount" -> String.valueOf(item.reviewCount());
+            case "reviewcount" -> String.valueOf(item.reviewCount());
             case "title" -> item.title();
             default -> item.title();
         };
+    }
+    private LocalDateTime parseLocalDateTime(String after) {
+        if (after == null || after.isBlank())
+            return null;
+        try {
+            ZoneId kstZone = ZoneId.of("Asia/Seoul");
+            if (after.endsWith("Z")) {
+                return LocalDateTime.ofInstant(Instant.parse(after), kstZone);
+            }
+            return LocalDateTime.parse(after);
+        } catch (Exception e) {
+            return LocalDate.parse(after.substring(0, 10)).atStartOfDay();
+        }
+    }
+
+    private String normalizeOrderBy(String orderBy) {
+        if (orderBy == null || orderBy.isBlank()) {
+            return "title";
+        }
+        return orderBy.trim().toLowerCase();
+    }
+
+    private String normalizeDirection(String direction) {
+        if (direction == null || direction.isBlank()) {
+            return "DESC";
+        }
+        return direction.trim().toUpperCase();
     }
 }
