@@ -1,27 +1,26 @@
 package com.deokhugam.deokhugam_server.domain.review.entity;
 
 import com.deokhugam.deokhugam_server.domain.book.entity.Book;
+import com.deokhugam.deokhugam_server.domain.comment.entity.Comment;
 import com.deokhugam.deokhugam_server.domain.user.entity.User;
 import com.deokhugam.deokhugam_server.global.entity.BaseEntity;
 import jakarta.persistence.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
-import lombok.AccessLevel;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Getter;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
 @Entity
 @Getter
 @Builder
-@AllArgsConstructor // 1. 모든 필드를 인자로 받는 생성자가 반드시 있어야 함 (Builder용)
+@AllArgsConstructor
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @Table(
     name = "review",
     uniqueConstraints = {
         @UniqueConstraint(
-            name = "uk_book_user",
-            columnNames = {"book_id", "user_id"}
+            name = "uk_book_user_is_deleted", // 수정: 논리 삭제 충돌 해결을 위해 is_deleted 추가
+            columnNames = {"book_id", "user_id", "is_deleted"}
         )
     }
 )
@@ -49,9 +48,19 @@ public class Review extends BaseEntity {
   @Column(nullable = false)
   private int likeCount = 0;
 
-  @Builder.Default // 2. 위와 동일
+  @Builder.Default
   @Column(nullable = false)
   private int commentCount = 0;
+
+  // --- 추가: 물리 삭제 연쇄 작용을 위한 설정 ---
+  @Builder.Default
+  @OneToMany(mappedBy = "review", cascade = CascadeType.REMOVE, orphanRemoval = true)
+  private List<ReviewLike> likes = new ArrayList<>();
+
+  @Builder.Default
+  @OneToMany(mappedBy = "review", cascade = CascadeType.REMOVE, orphanRemoval = true)
+  private List<Comment> comments = new ArrayList<>();
+  // ----------------------------------------------------
 
   public Review(Book book, User user, String content, int rating) {
     this.book = book;
@@ -63,5 +72,25 @@ public class Review extends BaseEntity {
   public void update(String content, int rating) {
     this.content = content;
     this.rating = rating;
+  }
+
+  public void increaseLikeCount() {
+    this.likeCount++;
+  }
+
+  public void decreaseLikeCount() {
+    if (this.likeCount > 0) {
+      this.likeCount--;
+    }
+  }
+
+  public void increaseCommentCount() {
+    this.commentCount++;
+  }
+
+  public void decreaseCommentCount() {
+    if (this.commentCount > 0) {
+      this.commentCount--;
+    }
   }
 }

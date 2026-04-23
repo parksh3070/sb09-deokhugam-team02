@@ -5,14 +5,16 @@ import static com.deokhugam.deokhugam_server.domain.review.entity.QReview.review
 import static com.deokhugam.deokhugam_server.domain.review.entity.QReviewLike.reviewLike;
 
 import com.deokhugam.deokhugam_server.domain.review.dto.request.ReviewSearchRequest;
+import com.deokhugam.deokhugam_server.domain.review.dto.response.ReviewDto;
 import com.deokhugam.deokhugam_server.domain.review.dto.response.ReviewRankQueryDto;
-import com.deokhugam.deokhugam_server.domain.review.entity.Review;
 import com.querydsl.core.types.OrderSpecifier;
 import com.querydsl.core.types.Projections;
 import com.querydsl.core.types.dsl.BooleanExpression;
+import com.querydsl.core.types.dsl.Expressions;
 import com.querydsl.jpa.impl.JPAQueryFactory;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.time.LocalDateTime;
@@ -25,22 +27,51 @@ public class ReviewRepositoryImpl implements ReviewRepositoryCustom {
   private final JPAQueryFactory queryFactory;
 
   @Override
-  public List<Review> searchReviews(ReviewSearchRequest request) {
+  public List<ReviewDto> searchReviews(ReviewSearchRequest request) {
     int pageSize = request.getLimit();
 
+    List<OrderSpecifier<?>> orders = new ArrayList<>();
+    boolean isAsc = "ASC".equalsIgnoreCase(request.getDirection());
+
+    if ("rating".equals(request.getOrderBy())) {
+      orders.add(isAsc ? review.rating.asc() : review.rating.desc());
+      orders.add(isAsc ? review.createdAt.asc() : review.createdAt.desc()); // 보조 정렬
+    } else {
+      orders.add(isAsc ? review.createdAt.asc() : review.createdAt.desc()); // 기본 정렬
+    }
+    orders.add(review.id.desc());
+
     return queryFactory
-        .selectFrom(review)
-        // 객체 참조 방식이므로 fetchJoin을 써서 User와 Book 정보를 한 번에 가져오면 성능 최적화(N+1 방지) 가능!
-        .leftJoin(review.book).fetchJoin()
-        .leftJoin(review.user).fetchJoin()
+        .select(Projections.constructor(ReviewDto.class,
+            review.id,
+            review.book.id,
+            review.book.title,
+            review.book.thumbnailUrl,
+            review.user.id,
+            review.user.nickname,
+            review.content,
+            review.rating,
+            review.likeCount,
+            review.commentCount,
+            reviewLike.id.isNotNull(), // 좋아요 여부
+            review.createdAt,
+            review.updatedAt
+        ))
+        .from(review)
+        .leftJoin(review.book)
+        .leftJoin(review.user)
+        .leftJoin(reviewLike).on(
+            reviewLike.review.eq(review),
+            eqRequestUserId(request.getRequestUserId())
+        )
         .where(
-            ltCursorAfter(request.getAfter(), request.getCursor()),
+            getCursorCondition(request.getAfter(), request.getCursor(), request.getDirection()),
             eqUserId(request.getUserId()),
             eqBookId(request.getBookId()),
             containsKeyword(request.getKeyword()),
             review.isDeleted.isFalse()
         )
-        .orderBy(getOrderSpecifier(request.getOrderBy(), request.getDirection()))
+        .orderBy(orders.toArray(new OrderSpecifier[0]))
         .limit(pageSize + 1)
         .fetch();
   }
@@ -54,42 +85,46 @@ public class ReviewRepositoryImpl implements ReviewRepositoryCustom {
             comment.id.countDistinct()
         ))
         .from(review)
-        // 객체 참조 방식으로 Join 조건 수정 (review_id 대신 review 객체 비교)
         .leftJoin(reviewLike).on(reviewLike.review.eq(review))
-        .leftJoin(comment).on(comment.reviewId.eq(review.id))
+        .leftJoin(comment).on(comment.review.eq(review))
         .where(review.createdAt.between(start.atStartOfDay(), end.atTime(LocalTime.MAX)))
         .groupBy(review.id)
         .fetch();
   }
 
-  private BooleanExpression ltCursorAfter(LocalDateTime after, String cursor) {
+  private BooleanExpression getCursorCondition(LocalDateTime after, String cursor, String direction) {
     if (after == null || cursor == null) return null;
-    return review.createdAt.lt(after)
-        .or(review.createdAt.eq(after)
-            .and(review.id.lt(UUID.fromString(cursor))));
+    UUID uuidCursor = UUID.fromString(cursor);
+    boolean isAsc = "ASC".equalsIgnoreCase(direction);
+
+    if (isAsc) {
+      return review.createdAt.gt(after)
+          .or(review.createdAt.eq(after).and(review.id.gt(uuidCursor)));
+    } else {
+      return review.createdAt.lt(after)
+          .or(review.createdAt.eq(after).and(review.id.lt(uuidCursor)));
+    }
   }
 
-  // 이제 review.userId가 아니라 review.user.id로 접근
+  private BooleanExpression eqRequestUserId(UUID requestUserId) {
+    if (requestUserId == null) {
+      return Expressions.asBoolean(true).isFalse();
+    }
+    return reviewLike.user.id.eq(requestUserId);
+  }
+
   private BooleanExpression eqUserId(UUID userId) {
     return userId != null ? review.user.id.eq(userId) : null;
   }
 
-  // 이제 review.bookId가 아니라 review.book.id로 접근
   private BooleanExpression eqBookId(UUID bookId) {
     return bookId != null ? review.book.id.eq(bookId) : null;
   }
 
   private BooleanExpression containsKeyword(String keyword) {
-    return StringUtils.hasText(keyword)
-        ? review.content.contains(keyword)
-        : null;
-  }
-
-  private OrderSpecifier<?> getOrderSpecifier(String orderBy, String direction) {
-    boolean isAsc = "ASC".equalsIgnoreCase(direction);
-    if ("rating".equals(orderBy)) {
-      return isAsc ? review.rating.asc() : review.rating.desc();
-    }
-    return isAsc ? review.createdAt.asc() : review.createdAt.desc();
+    if (!StringUtils.hasText(keyword)) return null;
+    return review.content.contains(keyword)
+        .or(review.user.nickname.contains(keyword))
+        .or(review.book.title.contains(keyword));
   }
 }
