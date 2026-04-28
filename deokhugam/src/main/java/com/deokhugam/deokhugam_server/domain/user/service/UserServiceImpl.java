@@ -46,7 +46,6 @@ public class UserServiceImpl implements UserService {
     }
     String encodedPassword = passwordEncoder.encode(request.password());
     User user = User.builder()
-        .id(UUID.randomUUID())
         .email(request.email())
         .nickname(request.nickname())
         .password(encodedPassword)
@@ -82,12 +81,16 @@ public class UserServiceImpl implements UserService {
         throw new DeokhugamException(ErrorCode.INVALID_INPUT_VALUE);
       }
     }
-    LocalDateTime afterLdt = parseLocalDateTime(after);
-
-    List<PowerUser> powerUsers = powerUserRepository.findPowerUsersByRequirements(
-        period, direction.toUpperCase(), cursorRank, afterLdt,
-        Limit.of(limit + 1)
-    );
+    List<PowerUser> powerUsers;
+    if ("DESC".equalsIgnoreCase(direction)) {
+      powerUsers = powerUserRepository.findPowerUsersDesc(
+        period, cursorRank, Limit.of(limit + 1)
+      );
+    } else {
+      powerUsers = powerUserRepository.findPowerUsersAsc(
+        period, cursorRank, Limit.of(limit + 1)
+      );
+    }
 
     long totalElements = powerUserRepository.countByPeriodType(period);
 
