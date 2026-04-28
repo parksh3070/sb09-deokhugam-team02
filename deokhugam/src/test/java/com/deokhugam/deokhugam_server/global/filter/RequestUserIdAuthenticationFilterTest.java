@@ -2,8 +2,8 @@ package com.deokhugam.deokhugam_server.global.filter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import jakarta.servlet.ServletException;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
 import java.io.IOException;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
@@ -16,11 +16,11 @@ import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
-class JwtAuthenticationFilterTest {
+class RequestUserIdAuthenticationFilterTest {
 
   private static final String USER_ID_HEADER = "Deokhugam-Request-User-ID";
 
-  private final JwtAuthenticationFilter filter = new JwtAuthenticationFilter();
+  private final RequestUserIdAuthenticationFilter filter = new RequestUserIdAuthenticationFilter();
 
   @AfterEach
   void tearDown() {
@@ -36,7 +36,7 @@ class JwtAuthenticationFilterTest {
     MockHttpServletResponse response = new MockHttpServletResponse();
     AtomicReference<Authentication> authenticationInChain = new AtomicReference<>();
     FilterChain chain = (req, res) ->
-      authenticationInChain.set(SecurityContextHolder.getContext().getAuthentication());
+        authenticationInChain.set(SecurityContextHolder.getContext().getAuthentication());
 
     filter.doFilter(request, response, chain);
 
