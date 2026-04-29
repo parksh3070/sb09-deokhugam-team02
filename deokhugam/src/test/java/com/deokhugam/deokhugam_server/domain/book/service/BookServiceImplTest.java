@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
@@ -32,6 +33,7 @@ import com.deokhugam.deokhugam_server.global.exception.DeokhugamException;
 import com.deokhugam.deokhugam_server.global.exception.ErrorCode;
 import com.deokhugam.deokhugam_server.global.response.CursorPageResponse;
 import com.deokhugam.deokhugam_server.global.type.Period;
+import com.deokhugam.deokhugam_server.global.util.S3Util;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -63,6 +65,9 @@ class BookServiceImplTest {
 
   @Mock
   private BookInfoClient bookInfoClient;
+
+  @Mock
+  private S3Util s3Util;
 
   @InjectMocks
   private BookServiceImpl bookService;
@@ -127,6 +132,72 @@ class BookServiceImplTest {
     assertEquals(expectedDto.title(), result.title());
     assertEquals(expectedDto.isbn(), result.isbn());
     verify(bookRepository, times(1)).save(any(Book.class));
+  }
+
+  @Test
+  @DisplayName("도서 생성 성공 - 썸네일 이미지를 S3에 업로드한다")
+  void createBook_success_withThumbnailImage() {
+    UUID bookId = UUID.randomUUID();
+    LocalDate publishedDate = LocalDate.of(2024, 1, 1);
+    LocalDateTime now = LocalDateTime.now();
+    String thumbnailUrl = "https://s3.test/books/thumbnail.png";
+
+    BookCreateRequest request = new BookCreateRequest(
+      "클린 코드",
+      "로버트 마틴",
+      "978-89-1234-567-8",
+      "인사이트",
+      "설명",
+      publishedDate
+    );
+    MockMultipartFile thumbnailImage = new MockMultipartFile(
+      "thumbnailImage",
+      "thumbnail.png",
+      "image/png",
+      "dummy-image".getBytes()
+    );
+    Book savedBook = mock(Book.class);
+    BookSearchQueryDto queryDto = new BookSearchQueryDto(
+      bookId,
+      "클린 코드",
+      "로버트 마틴",
+      "설명",
+      "인사이트",
+      publishedDate,
+      "9788912345678",
+      thumbnailUrl,
+      0L,
+      0.0,
+      now,
+      now
+    );
+    BookDto expectedDto = new BookDto(
+      bookId,
+      "클린 코드",
+      "로버트 마틴",
+      "설명",
+      "인사이트",
+      publishedDate,
+      "9788912345678",
+      thumbnailUrl,
+      0,
+      0.0,
+      now,
+      now
+    );
+
+    when(bookRepository.existsByIsbn("9788912345678")).thenReturn(false);
+    when(s3Util.upload(thumbnailImage, "books")).thenReturn(thumbnailUrl);
+    when(bookRepository.save(any(Book.class))).thenReturn(savedBook);
+    when(savedBook.getId()).thenReturn(bookId);
+    when(bookRepository.findBookDetail(bookId)).thenReturn(queryDto);
+    when(bookMapper.toDto(queryDto)).thenReturn(expectedDto);
+
+    BookDto result = bookService.createBook(request, thumbnailImage);
+
+    assertEquals(thumbnailUrl, result.thumbnailUrl());
+    verify(s3Util).upload(thumbnailImage, "books");
+    verify(bookRepository).save(any(Book.class));
   }
 
   @Test
@@ -616,7 +687,6 @@ class BookServiceImplTest {
     Period period = Period.DAILY;
     String direction = "DESC";
     String cursor = null;
-    String after = null;
     int limit = 10;
 
     PopularBook popularBook = mock(PopularBook.class);
@@ -635,9 +705,8 @@ class BookServiceImplTest {
       LocalDateTime.now()
     );
 
-    when(popularBookRepository.findPopularBooksWithPaging(
+    when(popularBookRepository.findPopularBooksDesc(
       eq(period),
-      eq("DESC"),
       nullable(Integer.class),
       nullable(LocalDateTime.class),
       any(Limit.class)
@@ -647,7 +716,7 @@ class BookServiceImplTest {
     when(bookMapper.toPopularDto(popularBook)).thenReturn(dto);
 
     CursorPageResponse<PopularBookDto> result =
-      bookService.searchPopularBooks(period, direction, cursor, after, limit);
+      bookService.searchPopularBooks(period, direction, cursor, LocalDateTime.now(), limit);
 
     assertNotNull(result);
     assertEquals(1, result.content().size());
@@ -660,7 +729,6 @@ class BookServiceImplTest {
   void searchPopularBooks_success_hasNext() {
     Period period = Period.DAILY;
     String direction = "DESC";
-    int limit = 1;
 
     PopularBook first = mock(PopularBook.class);
     PopularBook second = mock(PopularBook.class);
@@ -684,9 +752,8 @@ class BookServiceImplTest {
       firstCreatedAt
     );
 
-    when(popularBookRepository.findPopularBooksWithPaging(
+    when(popularBookRepository.findPopularBooksDesc(
       eq(period),
-      eq("DESC"),
       nullable(Integer.class),
       nullable(LocalDateTime.class),
       any(Limit.class)
@@ -696,13 +763,13 @@ class BookServiceImplTest {
     when(bookMapper.toPopularDto(first)).thenReturn(firstDto);
 
     CursorPageResponse<PopularBookDto> result =
-      bookService.searchPopularBooks(period, direction, null, null, limit);
+      bookService.searchPopularBooks(period, direction, null, null, 1);
 
     assertNotNull(result);
     assertEquals(1, result.content().size());
     assertEquals(2L, result.totalElements());
     assertEquals("1", result.nextCursor());
     assertEquals(firstCreatedAt, result.nextAfter());
-    assertEquals(true, result.hasNext());
+    assertTrue(result.hasNext());
   }
 }

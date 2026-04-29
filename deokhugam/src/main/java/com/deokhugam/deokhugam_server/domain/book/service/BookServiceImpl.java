@@ -19,10 +19,8 @@ import com.deokhugam.deokhugam_server.global.exception.DeokhugamException;
 import com.deokhugam.deokhugam_server.global.exception.ErrorCode;
 import com.deokhugam.deokhugam_server.global.response.CursorPageResponse;
 import com.deokhugam.deokhugam_server.global.type.Period;
-import java.time.Instant;
-import java.time.LocalDate;
+import com.deokhugam.deokhugam_server.global.util.S3Util;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -52,12 +50,14 @@ public class BookServiceImpl implements BookService {
   private final PopularBookRepository popularBookRepository;
   private final TextExtractionClient textExtractionClient;
   private final BookInfoClient bookInfoClient;
+  private final S3Util s3Util;
 
   @Override
   @Transactional
   public BookDto createBook(BookCreateRequest request, MultipartFile thumbnailImage) {
     String normalizedIsbn = normalizeIsbn(request.isbn());
     validateDuplicateIsbn(normalizedIsbn);
+    String thumbnailUrl = uploadThumbnailImage(thumbnailImage);
 
     Book book = new Book(
       request.title().trim(),
@@ -65,7 +65,7 @@ public class BookServiceImpl implements BookService {
       normalizedIsbn,
       normalizeText(request.publisher()),
       normalizeText(request.description()),
-      null,
+      thumbnailUrl,
       request.publishedDate()
     );
 
@@ -136,13 +136,14 @@ public class BookServiceImpl implements BookService {
   public BookDto updateBook(UUID bookId, BookUpdateRequest request, MultipartFile thumbnailImage) {
     Book book = bookRepository.findByIdAndIsDeletedFalse(bookId)
       .orElseThrow(() -> new DeokhugamException(ErrorCode.BOOK_NOT_FOUND));
+    String thumbnailUrl = uploadThumbnailImage(thumbnailImage);
 
     book.update(
       normalizeText(request.title()),
       normalizeText(request.author()),
       normalizeText(request.publisher()),
       normalizeText(request.description()),
-      null,
+      thumbnailUrl,
       request.publishedDate()
     );
 
@@ -172,25 +173,26 @@ public class BookServiceImpl implements BookService {
 
   @Override
   public CursorPageResponse<PopularBookDto> searchPopularBooks(
-    Period period, String direction, String cursor, String after, int limit
+    Period period, String direction, String cursor, LocalDateTime after, int limit
   ) {
-    Integer cursorRank = parseCursorRank(cursor);
-    LocalDateTime afterLdt = parseLocalDateTime(after);
+    Integer cursorInt = (cursor != null) ? Integer.parseInt(cursor) : null;
+    Limit limitWithNext = Limit.of(limit + 1);
 
-    List<PopularBook> popularBooks = popularBookRepository.findPopularBooksWithPaging(
-      period, direction.toUpperCase(), cursorRank, afterLdt,
-      Limit.of(limit + 1)
-    );
+    List<PopularBook> results = "DESC".equalsIgnoreCase(direction)
+      ? popularBookRepository.findPopularBooksDesc(period, cursorInt, after, limitWithNext)
+      : popularBookRepository.findPopularBooksAsc(period, cursorInt, after, limitWithNext);
 
+    boolean hasNext = results.size() > limit;
+    List<PopularBook> content = hasNext ? results.subList(0, limit) : results;
+
+    String nextCursor = null;
+    LocalDateTime nextAfter = null;
+    if (!content.isEmpty()) {
+      PopularBook lastItem = content.get(content.size() - 1);
+      nextCursor = String.valueOf(lastItem.getRankOrder());
+      nextAfter = lastItem.getCreatedAt();
+    }
     long totalElements = popularBookRepository.countByPeriodType(period);
-
-    boolean hasNext = popularBooks.size() > limit;
-    List<PopularBook> content = hasNext ? popularBooks.subList(0, limit) : popularBooks;
-
-    String nextCursor =
-      content.isEmpty() ? null : String.valueOf(content.get(content.size() - 1).getRankOrder());
-    LocalDateTime nextAfter =
-      content.isEmpty() ? null : content.get(content.size() - 1).getCreatedAt();
 
     return new CursorPageResponse<>(
       content.stream().map(bookMapper::toPopularDto).toList(),
@@ -228,6 +230,19 @@ public class BookServiceImpl implements BookService {
       throw new DeokhugamException(ErrorCode.INVALID_FILE);
     }
 
+    validateImageContentType(image);
+  }
+
+  private String uploadThumbnailImage(MultipartFile image) {
+    if (image == null || image.isEmpty()) {
+      return null;
+    }
+
+    validateImageContentType(image);
+    return s3Util.upload(image, "books");
+  }
+
+  private void validateImageContentType(MultipartFile image) {
     String contentType = image.getContentType();
     if (contentType == null || !contentType.startsWith("image/")) {
       throw new DeokhugamException(ErrorCode.INVALID_FILE_TYPE);
@@ -286,22 +301,6 @@ public class BookServiceImpl implements BookService {
       case "title" -> item.title();
       default -> item.title();
     };
-  }
-
-  private LocalDateTime parseLocalDateTime(String after) {
-    if (after == null || after.isBlank()) {
-      return null;
-    }
-
-    try {
-      ZoneId kstZone = ZoneId.of("Asia/Seoul");
-      if (after.endsWith("Z")) {
-        return LocalDateTime.ofInstant(Instant.parse(after), kstZone);
-      }
-      return LocalDateTime.parse(after);
-    } catch (Exception e) {
-      return LocalDate.parse(after.substring(0, 10)).atStartOfDay();
-    }
   }
 
   private String normalizeOrderBy(String orderBy) {
