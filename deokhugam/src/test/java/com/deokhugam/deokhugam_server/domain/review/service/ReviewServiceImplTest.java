@@ -1,5 +1,6 @@
 package com.deokhugam.deokhugam_server.domain.review.service;
 
+import static com.deokhugam.deokhugam_server.domain.review.entity.QPopularReview.popularReview;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,6 +28,7 @@ import com.deokhugam.deokhugam_server.domain.user.entity.User;
 import com.deokhugam.deokhugam_server.domain.user.repository.UserRepository;
 import com.deokhugam.deokhugam_server.global.exception.DeokhugamException;
 import com.deokhugam.deokhugam_server.global.exception.ErrorCode;
+import com.deokhugam.deokhugam_server.global.mapper.StaticImagePathMapper;
 import com.deokhugam.deokhugam_server.global.response.CursorPageResponse;
 import com.deokhugam.deokhugam_server.global.type.Period;
 import java.time.LocalDate;
@@ -59,6 +61,7 @@ class ReviewServiceImplTest {
   @Mock private ReviewMapper reviewMapper;
   @Mock private PopularReviewRepository popularReviewRepository;
   @Mock private ApplicationEventPublisher eventPublisher;
+  @Mock private StaticImagePathMapper staticImagePathMapper;
 
   private User user;
   private Book book;
@@ -159,10 +162,31 @@ class ReviewServiceImplTest {
         new ReviewDto(UUID.randomUUID(), bookId, "T2", "U2", userId, "N2", "C2", 4, 0, 0, false, LocalDateTime.now(), null)
       ));
       given(reviewRepository.searchReviews(any())).willReturn(dtoList);
+      given(staticImagePathMapper.normalizeStaticImagePath(any())).willAnswer(invocation -> invocation.getArgument(0));
 
       CursorPageResponse<ReviewDto> result = reviewService.searchReviews(request);
       assertThat(result.content()).hasSize(1);
       assertThat(result.hasNext()).isTrue();
+    }
+
+    @Test
+    @DisplayName("일반 검색: 도서 썸네일 URL을 응답용 경로로 변환")
+    void searchReviews_NormalizeBookThumbnailUrl() {
+      ReviewSearchRequest request = new ReviewSearchRequest();
+      request.setLimit(10);
+      String storedThumbnailUrl = "https://deokhugam-storage.s3.ap-northeast-2.amazonaws.com/thumbnails/book.jpg";
+      String responseThumbnailUrl = "https://presigned.example.com/thumbnails/book.jpg";
+      List<ReviewDto> dtoList = List.of(
+          new ReviewDto(reviewId, bookId, "T1", storedThumbnailUrl, userId, "N1", "C1", 5, 0, 0, false, LocalDateTime.now(), null)
+      );
+
+      given(reviewRepository.searchReviews(any())).willReturn(dtoList);
+      given(staticImagePathMapper.normalizeStaticImagePath(storedThumbnailUrl)).willReturn(responseThumbnailUrl);
+
+      CursorPageResponse<ReviewDto> result = reviewService.searchReviews(request);
+
+      assertThat(result.content()).hasSize(1);
+      assertThat(result.content().get(0).bookThumbnailUrl()).isEqualTo(responseThumbnailUrl);
     }
 
     @Test
@@ -171,8 +195,8 @@ class ReviewServiceImplTest {
       PopularReview pr = PopularReview.builder().review(review).rankOrder(1).build();
       ReflectionTestUtils.setField(pr, "createdAt", LocalDateTime.now());
 
-      given(popularReviewRepository.findPopularReviewsDesc(any(), any(), any(), any()))
-        .willReturn(List.of(pr));
+      when(popularReviewRepository.findPopularReviewDynamic(any(), any(), any(), anyString(), anyInt(), any(LocalDate.class)))
+        .thenReturn(List.of(pr));
       given(popularReviewRepository.countByPeriodType(any())).willReturn(1L);
 
       CursorPageResponse<PopularReviewDto> result = reviewService.searchPopularReviews(Period.DAILY, "DESC", null, null, 10);
